@@ -699,6 +699,18 @@ $("scenarioDetail").addEventListener("click", (e) => {
 
 /* ---------------- 实测温度复核 ---------------- */
 const SIDE_LABEL = { high: "超上限", low: "超下限", both: "双向超界" };
+/* 温区判定:确定超限 / 可能超限 / 确定未超 */
+const LIMIT_VERDICT = {
+  certain_exceeded: { text: "⚠ 确定超界", cls: "badge-bad" },
+  possible_exceeded: { text: "? 可能超界", cls: "badge-warn" },
+  certain_within: { text: "✓ 确定未超界", cls: "badge-ok" },
+};
+/* 度时预算判定 */
+const BUDGET_VERDICT = {
+  certain_exceeded: { text: "⚠ 确定超限", cls: "heat-text-bad" },
+  possible_exceeded: { text: "? 可能超限", cls: "heat-text-warn" },
+  certain_within: { text: "✓ 确定未超限", cls: "heat-text-ok" },
+};
 
 const fmtHms = (s) => {
   const t = Math.round(s);
@@ -747,6 +759,12 @@ async function runReview() {
     showReviewError("请选择要复核的箱子");
     return;
   }
+  const errRaw = $("reviewError").value;
+  const instrumentError = errRaw === "" ? 0 : Number(errRaw);
+  if (!Number.isFinite(instrumentError) || instrumentError < 0) {
+    showReviewError("测温仪器绝对误差须为非负数值(℃)");
+    return;
+  }
   let csvText;
   try {
     csvText = await file.text();
@@ -765,6 +783,7 @@ async function runReview() {
         plan_input: JSON.parse(planSnapshot),
         box_no: boxNo,
         csv: csvText,
+        instrument_error: instrumentError,
       }),
     });
     const data = await resp.json();
@@ -781,53 +800,103 @@ async function runReview() {
 
 function renderReview(data) {
   const sm = data.summary;
+  const err = Number(data.instrument_error || 0);
+  const errChip = err > 0
+    ? `<span class="assess-chip chip-warn">仪器绝对误差 ±${fmt(err)} ℃</span>`
+    : '<span class="assess-chip">仪器绝对误差 0 ℃(按实测值判定)</span>';
+  let overall;
+  if (sm.all_certainly_within_limits) {
+    overall = '<span class="assess-chip chip-ok">✓ 全部批次确定未超界</span>';
+  } else if (sm.batches_certain_excursion) {
+    overall = `<span class="assess-chip chip-bad">⚠ ${sm.batches_certain_excursion} 批确定超界` +
+      `${sm.batches_possible_excursion ? ` · ${sm.batches_possible_excursion} 批仅可能超界` : ""}</span>`;
+  } else {
+    overall = `<span class="assess-chip chip-warn">? ${sm.batches_possible_excursion} 批可能超界</span>`;
+  }
+  const budgetChip = sm.budget_possible_count
+    ? `<span class="assess-chip chip-warn">确定超限 ${sm.budget_exceeded_count} · 可能超限 ${sm.budget_possible_count} / 受检 ${sm.budget_checked_count} 批</span>`
+    : `<span class="assess-chip ${sm.budget_exceeded_count ? "chip-bad" : "chip-ok"}">确定超限 ${sm.budget_exceeded_count} / 受检 ${sm.budget_checked_count} 批</span>`;
   $("reviewMeta").innerHTML = `
     <span class="assess-chip">第 ${data.box_no} 箱 · 全程 ${fmt(data.transport_hours)} h（${fmt(data.duration_seconds)} 秒）</span>
     <span class="assess-chip">采样 ${fmt(data.sample_count)} 条</span>
-    <span class="assess-chip ${sm.all_within_limits ? "chip-ok" : "chip-bad"}">${
-      sm.all_within_limits ? "✓ 全部批次在允许温区内" : `⚠ ${sm.batches_with_excursions} 批存在超界区间`
-    }</span>
-    <span class="assess-chip ${sm.budget_exceeded_count ? "chip-bad" : "chip-ok"}">预算超限 ${sm.budget_exceeded_count} / 受检 ${sm.budget_checked_count} 批</span>
+    ${errChip}
+    ${overall}
+    ${budgetChip}
     <span class="assess-chip muted">快照 ${data.input_fingerprint.slice(0, 8)}</span>`;
-  $("reviewResult").innerHTML = data.batches.map(renderReviewBatch).join("");
+  $("reviewResult").innerHTML = data.batches.map((b) => renderReviewBatch(b, err)).join("");
 }
 
-function renderReviewBatch(b) {
-  const excRows = b.excursions
+function renderExcursionTable(title, cls, rows, showBand) {
+  if (!rows.length) return "";
+  const bandHead = showBand ? "<th class='num'>误差带温度范围</th>" : "";
+  const body = rows
     .map(
-      (x, i) => `<tr class="seg-bad">
+      (x, i) => `<tr class="${cls}">
         <td>第 ${i + 1} 段 · ${SIDE_LABEL[x.side] || x.side}</td>
         <td class="num">${fmt(x.start_s)} s（${fmtHms(x.start_s)}）</td>
         <td class="num">${fmt(x.end_s)} s（${fmtHms(x.end_s)}）</td>
         <td class="num">${fmt(x.duration_s)} s</td>
         <td class="num">${fmt(x.min_temperature)} ~ ${fmt(x.max_temperature)} ℃</td>
+        ${showBand ? `<td class="num">${fmt(x.band_t_min)} ~ ${fmt(x.band_t_max)} ℃</td>` : ""}
       </tr>`
     )
     .join("");
-  const excBlock = b.excursions.length
-    ? `<table class="seg-checks review-exc">
-        <thead><tr><th>超界区间（线性插值,边界处切段）</th><th class="num">开始</th><th class="num">结束</th><th class="num">持续</th><th class="num">区间温度</th></tr></thead>
-        <tbody>${excRows}</tbody>
-      </table>`
-    : '<div class="muted review-none">✓ 全程实测温度均在允许温区内（恰在边界不算超界）</div>';
+  return `<table class="seg-checks review-exc">
+      <thead><tr><th>${title}</th><th class="num">开始</th><th class="num">结束</th><th class="num">持续</th><th class="num">实测温度范围</th>${bandHead}</tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+function renderReviewBatch(b, err) {
+  const withErr = err > 0;
+  const certainBlock = renderExcursionTable(
+    "确定超界区间(误差带整体越界;线性插值,边界处切段)",
+    "seg-bad", b.certain_excursions, withErr
+  );
+  const possibleBlock = renderExcursionTable(
+    "可能超界区间(误差带接触或跨越界外,但未整体越界)",
+    "seg-warn", b.possible_excursions, withErr
+  );
+  let excBlock;
+  if (certainBlock || possibleBlock) {
+    excBlock = certainBlock + possibleBlock;
+  } else {
+    excBlock = withErr
+      ? '<div class="muted review-none">✓ 整个误差带全程均在允许温区内(恰在边界不算超界)</div>'
+      : '<div class="muted review-none">✓ 全程实测温度均在允许温区内(恰在边界不算超界)</div>';
+  }
+
   let heat;
   if (b.measured_degree_hours === null) {
     heat = '<span class="muted">未设首选温度区间,不核算实测度时</span>';
-  } else if (b.max_degree_hours === null) {
-    heat = `实测度时 <strong>${fmt(b.measured_degree_hours)}</strong> ℃·h <span class="muted">· 未设预算,不判预算超限</span>`;
   } else {
-    const cls = b.budget_exceeded ? "heat-text-bad" : "heat-text-ok";
-    heat = `实测度时 <strong>${fmt(b.measured_degree_hours)}</strong> ℃·h · 预算 ${fmt(b.max_degree_hours)} ℃·h · ` +
-      `剩余预算 <strong class="${cls}">${fmt(b.remaining_budget)}</strong> ℃·h · ` +
-      `<span class="${cls}">${b.budget_exceeded ? "⚠ 超出预算" : "✓ 预算内"}</span>`;
+    const dhLine = withErr
+      ? `实测度时 <strong>${fmt(b.measured_degree_hours)}</strong> ℃·h` +
+        ` <small class="muted">(名义值,不计误差)</small> · 度时区间 ` +
+        `<strong>${fmt(b.degree_hours_lower)} ~ ${fmt(b.degree_hours_upper)}</strong> ℃·h`
+      : `实测度时 <strong>${fmt(b.measured_degree_hours)}</strong> ℃·h`;
+    if (b.max_degree_hours === null) {
+      heat = `${dhLine} <span class="muted">· 未设预算,不判预算超限</span>`;
+    } else {
+      const v = BUDGET_VERDICT[b.budget_verdict] || BUDGET_VERDICT.certain_within;
+      const rem = withErr
+        ? `剩余预算区间 <strong class="${v.cls}">${fmt(b.remaining_budget_upper)} ~ ${fmt(b.remaining_budget_lower)}</strong> ℃·h`
+        : `剩余预算 <strong class="${v.cls}">${fmt(b.remaining_budget)}</strong> ℃·h`;
+      heat = `${dhLine} · 预算 ${fmt(b.max_degree_hours)} ℃·h · ${rem} · ` +
+        `<span class="${v.cls}">${v.text}</span>`;
+    }
   }
+
+  const lv = LIMIT_VERDICT[b.limit_verdict] || LIMIT_VERDICT.certain_within;
+  const bandChip = withErr
+    ? `<span class="temp-chip">误差带 T±${fmt(err)} ℃</span>`
+    : "";
   return `<div class="review-batch">
     <div class="rb-head">
       <span class="rb-title">#${b.batch_no} ${escapeHtml(b.name)} <small class="muted">${fmt(b.units)} 件</small></span>
       <span class="temp-chip">允许 ${fmt(b.allowed_t_min)} ~ ${fmt(b.allowed_t_max)} ℃</span>
-      <span class="badge ${b.within_limits ? "badge-ok" : "badge-bad"}">${
-        b.within_limits ? "✓ 全程在允许温区内" : `⚠ ${b.excursion_count} 段超界`
-      }</span>
+      ${bandChip}
+      <span class="badge ${lv.cls}">${lv.text}</span>
     </div>
     ${excBlock}
     <div class="rb-heat">${heat}</div>
@@ -868,6 +937,7 @@ function markReviewStale() {
   $("btnReview").disabled = stale;
   $("reviewBox").disabled = stale;
   $("reviewFile").disabled = stale;
+  $("reviewError").disabled = stale;
   $("btnCsvTemplate").disabled = stale;
 }
 

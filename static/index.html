@@ -116,6 +116,9 @@
             <label>复核箱子
               <select id="reviewBox"></select>
             </label>
+            <label>测温仪器绝对误差 (℃,非负,默认 0)
+              <input type="number" id="reviewError" min="0" step="0.1" value="0" />
+            </label>
             <label>实测温度 CSV(time_seconds,temperature)
               <input type="file" id="reviewFile" accept=".csv,text/csv" />
             </label>

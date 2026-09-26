@@ -16,11 +16,17 @@
 每个场景返回是否仍可运输、额外箱数、由已装载变为未装载的批次与件数及首个冲突原因，
 前端以 **风险矩阵** 展示并可展开查看与基准方案的差异；评估绑定同一输入快照，
 输入变化后旧结果自动标记为 **已过期**。
-支持 **实测温度复核**：在分箱结果页选择已生成方案的一箱，上传含
+支持 **实测温度复核**：在分箱结果页选择已生成方案的一箱，填写可选的
+**测温仪器绝对误差**（℃，非负，默认 0），上传含
 `time_seconds,temperature` 两列的实测温度 CSV，系统按该箱装载批次逐批核算——
-相邻采样间温度按 **线性变化**、在穿越批次温度边界处 **切段**，列出实际超出允许温区的
-全部 **起止秒数**（恰在边界不算超界）；对已设首选区间的批次，按温度到该区间的距离
-**积分** 并除以 3600 得到实测累计度时，**严格大于** 已设预算才判超限（未设预算不判）。
+相邻采样间实测温度按 **线性变化**，每时刻真实温度视为 **实测值 ± 仪器误差**；
+在穿越各相关边界处 **切段**，分别列出 **确定超界**（误差带整体越界）与
+**可能超界**（误差带接触或跨越界外、但未整体越界）的全部 **起止秒数**
+（恰在边界不算超界）；对已设首选区间的批次，每时刻取误差带到首选区间的
+**最近 / 最远距离** 对时间 **积分** 并除以 3600，得到实测度时 **下界 / 上界**
+（在距离公式改变处切段后精确积分），据此将度时预算判为 **确定超限、可能超限
+或确定未超限**（严格大于预算才判超限）。误差填 **0** 时确定超界即原实测超界、
+度时上下界相等，与原复核结果完全一致。
 复核绑定生成方案时的输入快照，修改输入后旧复核结果自动标记为 **已过期**，
 需重新生成方案后再复核。
 支持在页面上随时修改输入并重新规划。
@@ -115,12 +121,20 @@ APP_PORT=9000 docker compose up -d --build
      由已装载变为未装载的批次与件数、首个冲突原因；
    - 评估绑定触发时的 **输入快照**（响应含快照指纹）；此后修改任意输入，
      评估结果上方会出现 **「已过期」** 标记，重新点击按钮即可按新输入评估。
-7. 生成方案后，在结果页 **实测温度复核** 区选择任一箱子，上传实测温度 CSV
+7. 生成方案后，在结果页 **实测温度复核** 区选择任一箱子，填写
+   **测温仪器绝对误差**（℃，非负，默认 0；即把每时刻真实温度视为
+   实测值 ± 误差），上传实测温度 CSV
    （首行表头须含 `time_seconds,temperature` 两列；时间从 0 严格递增至
    全程秒数，至少两条记录），点击 **「📈 开始复核」**：
-   - 每批展示 **实测超界区间**（起止秒数 + 时刻、持续时长、区间温度范围）、
-     **实测度时**、**剩余预算** 与状态（未设首选区间的批次不核算度时，
-     未设预算的批次不判预算超限）；
+   - 每批用徽章标注总体判定（**✓ 确定未超界 / ? 可能超界 / ⚠ 确定超界**），
+     并分别列出 **确定超界区间**（误差带整体越界）与 **可能超界区间**
+     （误差带接触或跨越界外、但未整体越界）的起止秒数 + 时刻、持续时长、
+     实测温度范围；误差 > 0 时额外展示该区间的 **误差带温度范围**
+     （恰在边界不算超界）；
+   - 已设首选区间的批次展示 **实测度时**（名义值）与 **度时区间（下界 ~ 上界）**；
+     已设预算的批次据此标注 **✓ 确定未超限 / ? 可能超限 / ⚠ 确定超限**，
+     并展示预算与剩余预算区间（未设预算不判）；
+   - **误差填 0 时与原复核结果一致**：只展示确定超界区间，度时上下界相等；
    - 复核绑定 **生成方案时的输入快照**；此后修改任意输入，复核区出现
      **「已过期」** 标记并禁用复核按钮，重新生成方案后即可再次复核；
    - 点击 **「下载 CSV 模板」** 可按当前方案全程秒数生成空白模板。
@@ -186,7 +200,8 @@ APP_PORT=9000 docker compose up -d --build
 ## 七、实测温度复核规则
 
 - 复核请求携带 **生成方案时的输入快照**（`plan_input`，与 `/api/plan` 请求体
-  相同）、箱号（`box_no`）与实测温度 CSV 文本；服务端按快照 **重新规划** 并
+  相同）、箱号（`box_no`）、实测温度 CSV 文本与可选的 **测温仪器绝对误差**
+  `instrument_error`（℃，非负，默认 0）；服务端按快照 **重新规划** 并
   定位箱子，再按该箱装载批次逐批核算，保证复核与页面所示方案一致；
 - **CSV 校验**（任何一条不满足即整单拒绝，返回 400）：
   - 首行须为表头，且包含 `time_seconds`、`temperature` 两列（列顺序不限，
@@ -194,14 +209,36 @@ APP_PORT=9000 docker compose up -d --build
   - 至少 **两条** 记录；`time_seconds` 从 **0** 开始 **严格递增**，末条必须
     等于 **全程秒数**（运输时长 × 3600）；
   - 时间与温度均须为 **有限数值**（拒绝空值、非数字、NaN、±Inf）；
-- **超界区间**：相邻采样点之间温度按 **线性变化**，在穿越批次允许温区边界处
-  **切段**，列出实际超出允许温区的全部 **起止秒数**（附持续时长与区间内
-  温度极值）；**恰在边界（等于上下限）不算超界**；中间仅经过边界点的连续
-  超界段合并为一个区间；
-- **实测度时**：对已设 **首选温度区间** 的批次，按「温度到首选区间的距离」
-  对时间 **积分**（在穿越首选区间边界处切段后梯形精确积分，**不以采样点是否
-  超界或平均温度代替**）并 **除以 3600**，得到实测累计度时（℃·h）；
-  **严格大于** 已设度时预算才判超限；**未设预算的批次不判预算超限**；
+  - `instrument_error` 须为非负有限数值，否则返回 422；
+- **误差带模型**：设某时刻线性插值实测温度为 T、仪器绝对误差为 e，
+  则该时刻真实温度视为闭区间 **[T−e, T+e]**（误差带随时间整体平移）；
+- **超界区间**（按各批允许温区 [lo, hi] 分别核算）：相邻采样点间实测温度
+  按 **线性变化**，在穿越 lo−e、lo+e、hi−e、hi+e 处 **切段** 后逐微段判定：
+  - **确定超界**：误差带 **整体** 严格位于界外（T+e < lo 或 T−e > hi）；
+  - **可能超界**：误差带 **接触或跨越界外**、但未整体越界，即带内同时含
+    严格界外温度与界内温度（T−e < lo ≤ T+e 或 T−e ≤ hi < T+e）；
+  - **恰在边界（相等）不算超界**：如带仅为 [hi, …] 接触而不含严格大于
+    hi 的温度时不计；中间仅经过边界点的同类连续段合并为一个区间；
+  - 每段附起止秒数、持续时长、实测温度范围；e > 0 时另附误差带温度范围
+    （`band_t_min` / `band_t_max`）与 `side`（`low`/`high`/`both`）；
+- **实测度时与度时区间**：对已设 **首选温度区间** 的批次——
+  - `measured_degree_hours`：以实测温度 T 本身到首选区间的距离积分
+    ÷ 3600（名义实测度时，不受误差影响；在穿越首选区间边界处切段后
+    梯形精确积分）；
+  - `degree_hours_lower` / `degree_hours_upper`（℃·h）：每时刻取误差带
+    **[T−e, T+e] 到首选区间的最近距离 / 最远距离** 对时间积分 ÷ 3600。
+    最近距离在 T 越过 `首选下限−e`、`首选上限+e` 处改变公式，最远距离
+    在 T 越过 `首选下限+e`、`首选上限−e` 处改变公式；误差带宽于首选
+    区间时最远分支还在首选区间中点处交叉——上述折点（含中点）全部
+    **切段** 后每微段内距离均为 T 的线性函数，梯形求和为精确积分；
+- **度时预算判定**（已设首选区间且已设预算的批次）：
+  - 度时 **下界严格大于** 预算 → **确定超限**（`certain_exceeded`）；
+  - 下界不超而 **上界严格大于** 预算 → **可能超限**（`possible_exceeded`）；
+  - 上界不大于预算 → **确定未超限**（`certain_within`）；
+  - 未设预算的批次只给度时、不判超限；未设首选区间的批次两者均不给；
+- **误差为 0 时与原复核一致**：误差带退化为实测点，可能超界区间恒为空，
+  确定超界区间即原实测超界区间，度时下界 = 上界 = 原实测度时，
+  确定/可能超限退化为原“严格大于预算才判超限”的结果；
 - 响应携带输入快照的 SHA-256 指纹（`input_fingerprint`），输入变化后前端
   将旧复核结果标记为已过期，需重新生成方案后再复核。
 
@@ -448,7 +485,9 @@ curl -X POST http://localhost:8000/api/zone-failure-assessment \
 ### 实测温度复核
 
 `POST /api/temperature-review`，请求体携带 **生成方案时的输入快照**
-（`plan_input`，与 `/api/plan` 相同）、箱号与实测温度 CSV 文本：
+（`plan_input`，与 `/api/plan` 相同）、箱号、实测温度 CSV 文本，以及可选的
+测温仪器绝对误差 `instrument_error`（℃，非负，默认 0；每时刻真实温度
+视为实测值 ± 该误差）：
 
 ```bash
 curl -X POST http://localhost:8000/api/temperature-review \
@@ -457,7 +496,7 @@ curl -X POST http://localhost:8000/api/temperature-review \
     "plan_input": {
       "transport_hours": 4,
       "box_capacity": 12,
-      "zones": [{"name": "冷藏区", "t_min": -25, "t_max": 25}],
+      "zones": [{"name": "宽温区", "t_min": -25, "t_max": 25}],
       "cargoes": [
         {"name": "三文鱼", "units": 2, "unit_volume": 0.4,
          "t_min": 0, "t_max": 10,
@@ -467,11 +506,13 @@ curl -X POST http://localhost:8000/api/temperature-review \
       ]
     },
     "box_no": 1,
+    "instrument_error": 1,
     "csv": "time_seconds,temperature\n0,0\n3600,10\n7200,20\n10800,10\n14400,0\n"
   }'
 ```
 
-全程 4h = 14400 秒，温度 0→10→20→10→0℃ 线性变化。响应（节选）：
+全程 4h = 14400 秒，实测温度 0→10→20→10→0℃ 线性变化，仪器绝对误差 ±1℃。
+响应（节选）：
 
 ```json
 {
@@ -480,38 +521,79 @@ curl -X POST http://localhost:8000/api/temperature-review \
   "transport_hours": 4.0,
   "duration_seconds": 14400.0,
   "sample_count": 5,
+  "instrument_error": 1.0,
   "batches": [
     {"batch_no": 1, "name": "三文鱼", "units": 2,
      "allowed_t_min": 0.0, "allowed_t_max": 10.0,
-     "within_limits": false, "excursion_count": 1,
-     "excursions": [
-       {"start_s": 3600.0, "end_s": 10800.0, "duration_s": 7200.0,
-        "min_temperature": 10.0, "max_temperature": 20.0, "side": "high"}
+     "limit_verdict": "certain_exceeded",
+     "certain_excursion_count": 1,
+     "certain_excursions": [
+       {"start_s": 3960.0, "end_s": 10440.0, "duration_s": 6480.0,
+        "min_temperature": 11.0, "max_temperature": 20.0,
+        "band_t_min": 10.0, "band_t_max": 21.0, "side": "high"}
+     ],
+     "possible_excursion_count": 4,
+     "possible_excursions": [
+       {"start_s": 0.0, "end_s": 360.0, "duration_s": 360.0,
+        "min_temperature": 0.0, "max_temperature": 1.0,
+        "band_t_min": -1.0, "band_t_max": 2.0, "side": "low"},
+       {"start_s": 3240.0, "end_s": 3960.0, "duration_s": 720.0,
+        "min_temperature": 9.0, "max_temperature": 11.0,
+        "band_t_min": 8.0, "band_t_max": 12.0, "side": "high"}
      ],
      "preferred_t_min": 2.0, "preferred_t_max": 4.0,
-     "measured_degree_hours": 26.0, "max_degree_hours": 30.0,
-     "remaining_budget": 4.0, "budget_exceeded": false},
+     "measured_degree_hours": 26.0,
+     "degree_hours_lower": 22.6, "degree_hours_upper": 29.8,
+     "max_degree_hours": 30.0,
+     "remaining_budget_lower": 7.4, "remaining_budget_upper": 0.2,
+     "budget_verdict": "certain_within"},
     {"batch_no": 2, "name": "牛排", "units": 2,
      "allowed_t_min": -5.0, "allowed_t_max": 5.0,
-     "within_limits": false, "excursion_count": 1,
-     "excursions": [
-       {"start_s": 1800.0, "end_s": 12600.0, "duration_s": 10800.0,
-        "min_temperature": 5.0, "max_temperature": 20.0, "side": "high"}
+     "limit_verdict": "certain_exceeded",
+     "certain_excursion_count": 1,
+     "certain_excursions": [
+       {"start_s": 2160.0, "end_s": 12240.0, "duration_s": 10080.0,
+        "min_temperature": 5.0, "max_temperature": 20.0,
+        "band_t_min": 4.0, "band_t_max": 21.0, "side": "high"}
+     ],
+     "possible_excursion_count": 2,
+     "possible_excursions": [
+       {"start_s": 1440.0, "end_s": 2160.0, "duration_s": 720.0,
+        "min_temperature": 4.0, "max_temperature": 5.0,
+        "band_t_min": 3.0, "band_t_max": 6.0, "side": "high"},
+       {"start_s": 12240.0, "end_s": 12960.0, "duration_s": 720.0,
+        "min_temperature": 4.0, "max_temperature": 5.0,
+        "band_t_min": 3.0, "band_t_max": 6.0, "side": "high"}
      ],
      "preferred_t_min": null, "preferred_t_max": null,
-     "measured_degree_hours": null, "max_degree_hours": null,
-     "remaining_budget": null, "budget_exceeded": null}
+     "measured_degree_hours": null,
+     "degree_hours_lower": null, "degree_hours_upper": null,
+     "max_degree_hours": null,
+     "remaining_budget_lower": null, "remaining_budget_upper": null,
+     "budget_verdict": null}
   ],
-  "summary": {"batch_count": 2, "batches_with_excursions": 2,
-              "total_excursions": 2, "budget_checked_count": 1,
-              "budget_exceeded_count": 0, "all_within_limits": false}
+  "summary": {"batch_count": 2, "batches_certain_excursion": 2,
+              "batches_possible_excursion": 0,
+              "total_certain_excursions": 2,
+              "total_possible_excursions": 6,
+              "budget_checked_count": 1,
+              "budget_exceeded_count": 0, "budget_possible_count": 0,
+              "all_certainly_within_limits": false}
 }
 ```
 
-三文鱼允许温区 [0,10]℃：温度在 t=3600s 穿越上限 10℃、t=10800s 回到边界，
-超界区间为 **3600~10800 秒**（线性插值切段，恰在边界的端点不计超界）；
-实测度时按「到首选区间 [2,4]℃ 的距离」精确积分得 **26 ℃·h**，未超 30 ℃·h
-预算。牛排未设首选区间与预算，只核算超界区间，不判预算超限。
+三文鱼允许温区 [0,10]℃：误差 ±1℃ 下，只有 **下沿 T−1 也高于 10℃**
+（T > 11℃，t = 3960~10440 秒）才 **确定超界**；而 0~360 秒处误差带
+[−1, …] 触及下限下方、3240~3960 秒与 10440~11160 秒误差带跨越上限，
+均只属 **可能超界**（恰在边界的点不计，故可能段从 T=1℃ 即 t=360s 处终止）。
+度时方面，名义实测度时为 26 ℃·h，误差带使真实度时落在 **22.6~29.8 ℃·h**，
+上界也未超 30 ℃·h 预算，判 **确定未超限**。
+
+`instrument_error` 省略或填 0 时与原复核完全一致：`possible_excursions`
+恒为空、`certain_excursions` 即原实测超界区间、`degree_hours_lower` 与
+`degree_hours_upper` 均等于原实测度时（此时兼容字段 `excursions`、
+`within_limits`、`measured_degree_hours`、`remaining_budget`、
+`budget_exceeded` 继续返回原值）。
 
 ### 实测温度复核响应字段
 
@@ -519,14 +601,20 @@ curl -X POST http://localhost:8000/api/temperature-review \
 | --- | --- |
 | `input_fingerprint` | 输入快照的 SHA-256 指纹；输入变化后前端据此将旧复核标记为已过期 |
 | `box_no` / `transport_hours` / `duration_seconds` | 复核箱号、全程时长（h）与全程秒数 |
+| `instrument_error` | 本次复核使用的测温仪器绝对误差（℃，默认 0） |
 | `sample_count` | 通过校验的采样记录数 |
 | `batches[].allowed_t_min` / `allowed_t_max` | 该批允许温区（硬边界） |
-| `batches[].excursions[]` | 实际超出允许温区的区间：`start_s` / `end_s`（起止秒数）、`duration_s`、`min_temperature` / `max_temperature`（区间温度极值）、`side`（`high` 超上限 / `low` 超下限 / `both`） |
-| `batches[].within_limits` / `excursion_count` | 该批是否全程在允许温区内、超界区间数 |
-| `batches[].measured_degree_hours` | 实测累计度时（℃·h，距离积分 ÷ 3600）；未设首选区间为 `null` |
-| `batches[].max_degree_hours` / `remaining_budget` | 度时预算与剩余预算（可为负）；未设预算为 `null` |
-| `batches[].budget_exceeded` | 是否预算超限（**严格大于**预算才判）；未设预算为 `null`（不判） |
-| `summary` | 批次数、存在超界/预算超限的批次数、受检批次数、是否全部批次全程在允许温区内 |
+| `batches[].limit_verdict` | 温区总判定：`certain_exceeded`（存在确定超界段）/ `possible_exceeded`（无确定但存在可能超界段）/ `certain_within`（误差带全程在界内） |
+| `batches[].certain_excursions[]` | **确定超界**区间（误差带整体严格越界）：`start_s` / `end_s`、`duration_s`、`min_temperature` / `max_temperature`（实测范围）、`band_t_min` / `band_t_max`（误差带温度范围）、`side`（`high` / `low` / `both`） |
+| `batches[].possible_excursions[]` | **可能超界**区间（误差带接触或跨越界外、但未整体越界）；字段同上；恰在边界（相等）不计 |
+| `batches[].excursions` / `within_limits` / `excursion_count` | 兼容字段：始终等同 `certain_excursions` / 其是否为空 / 其段数；误差为 0 时即原字段含义 |
+| `batches[].measured_degree_hours` | 名义实测累计度时（℃·h，以实测温度距离积分 ÷ 3600，不受误差影响）；未设首选区间为 `null` |
+| `batches[].degree_hours_lower` / `degree_hours_upper` | 误差带到首选区间的最近 / 最远距离积分（℃·h），即真实度时的下界与上界；误差为 0 时两者相等且等于 `measured_degree_hours`；未设首选区间为 `null` |
+| `batches[].max_degree_hours` | 度时预算；未设预算为 `null` |
+| `batches[].remaining_budget_lower` / `remaining_budget_upper` | 剩余预算区间（预算 − 度时上界 / 预算 − 度时下界，可为负）；未设预算为 `null` |
+| `batches[].budget_verdict` | `certain_exceeded`（下界严格大于预算）/ `possible_exceeded`（上界严格大于预算而下界不超）/ `certain_within`（上界不大于预算）；未设预算为 `null` |
+| `batches[].budget_exceeded` / `remaining_budget` | 兼容字段：误差为 0 时等同原判定（**严格大于**预算才判超限）与原剩余预算；误差 > 0 时二者为 `null`，请使用 `budget_verdict` 与剩余预算区间 |
+| `summary` | 批次数、确定/可能超界批次数与区间总数、预算受检/确定超限/可能超限批次数、`all_certainly_within_limits`（全部批次误差带全程在界内） |
 
 ### 响应字段（新增部分）
 
@@ -568,7 +656,7 @@ curl -X POST http://localhost:8000/api/temperature-review \
 │   ├── main.py        # FastAPI 入口与静态资源挂载
 │   ├── planner.py     # 温区兼容 + 容量约束 + 热暴露预算 + 锁温区段分箱算法
 │   ├── resilience.py  # 单温区故障容灾评估(逐温区模拟失效并重规划)
-│   ├── review.py      # 实测温度复核(CSV 校验、线性插值切段、超界区间与度时积分)
+│   ├── review.py      # 实测温度复核(CSV 校验、误差带线性插值切段、确定/可能超界、度时上下界积分)
 │   └── schemas.py     # 请求模型
 ├── static/
 │   ├── index.html     # 单页前端
