@@ -17,8 +17,12 @@ app = FastAPI(
     "并提供单温区故障容灾评估:将每个运输段的每个可用温区分别模拟为不可用,"
     "复用完整规则重新规划并输出风险矩阵数据;"
     "以及实测温度复核:上传实测温度 CSV,按所选箱子的装载批次核算超界区间"
-    "与实测度时(温度线性插值、边界处切段、距离积分 ÷ 3600)",
-    version="1.5.0",
+    "与实测度时(温度线性插值、边界处切段、距离积分 ÷ 3600);"
+    "可选测温仪器绝对误差(℃,默认 0):真实温度视为实测值±误差,"
+    "按误差带分别列出确定超界(带整体越界)与可能超界(带接触或跨越界外)"
+    "区间,并给出度时下界、上界与预算判定(确定超限/可能超限/确定未超限),"
+    "误差为 0 时与原复核结果一致",
+    version="1.6.0",
 )
 
 
@@ -47,10 +51,11 @@ async def api_zone_failure_assessment(req: PlanRequest) -> dict:
 
 @app.post("/api/temperature-review", tags=["review"])
 async def api_temperature_review(req: ReviewRequest) -> dict:
-    """实测温度复核:请求体携带生成方案时的输入快照(plan_input)、箱号与
-    实测温度 CSV(time_seconds,temperature 两列);按快照重新规划定位箱子,
-    再按该箱装载批次核算超界区间与实测度时。输入变化后旧复核结果过期,
-    需重新生成方案。"""
+    """实测温度复核:请求体携带生成方案时的输入快照(plan_input)、箱号、
+    实测温度 CSV(time_seconds,temperature 两列)与可选的测温仪器绝对误差
+    (instrument_error,非负 ℃,默认 0);按快照重新规划定位箱子,再按该箱
+    装载批次核算确定/可能超界区间与度时下界、上界及预算判定。输入变化后
+    旧复核结果过期,需重新生成方案。"""
     return review(req.model_dump())
 
 

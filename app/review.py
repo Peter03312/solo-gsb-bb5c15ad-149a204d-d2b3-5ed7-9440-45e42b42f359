@@ -6,11 +6,18 @@
 
 - CSV 校验:时间从 0 严格递增至全程秒数(运输时长 × 3600),至少两条记录,
   时间与温度均须为有限数值;任何非法记录整单拒绝(由入口统一转为 400)。
-- 超界区间:相邻采样点之间温度按线性变化,在穿越批次允许温区边界处切段,
-  列出实际超出允许温区的全部起止秒数;恰在边界(等于上下限)不算超界。
-- 实测度时:对已设首选温度区间的批次,按"温度到首选区间的距离"对时间积分
-  (在穿越首选区间边界处切段后梯形精确积分)并除以 3600,得到累计度时(℃·h);
-  严格大于已设度时预算才判超限,未设预算的批次不判预算超限。
+- 测温仪器绝对误差(可选,非负 ℃,默认 0):每时刻真实温度视为实测值 ±误差,
+  即误差带 [实测-误差, 实测+误差];误差为 0 时退化为仅按实测值核算,
+  结果与原复核完全一致。
+- 超界区间:相邻采样点之间温度按线性变化,在误差带边界(实测 ±误差)穿越
+  批次允许温区边界处切段,分别列出"确定超界"(误差带整体越界)与"可能超界"
+  (误差带接触或跨越界外,但未整体越界)的连续起止秒数;恰在边界(带端点
+  等于上下限)不算超界。
+- 实测度时:对已设首选温度区间的批次,每时刻取误差带到首选区间的最近、
+  最远距离,对时间积分(在距离公式改变处切段后梯形精确积分)并除以 3600,
+  得到度时下界与上界(℃·h);据此将已设度时预算的批次判为确定超限
+  (下界严格大于预算)、可能超限(上界严格大于预算但下界未超)或
+  确定未超限(上界未超预算);未设预算的批次不判预算超限。
 
 响应携带输入快照指纹(SHA-256),输入变化后前端据此将旧复核结果标记为已过期。
 """
@@ -34,6 +41,16 @@ def _dist(t: float, lo: float, hi: float) -> float:
     if t > hi:
         return t - hi
     return 0.0
+
+
+def _band_dist_min(t: float, err: float, lo: float, hi: float) -> float:
+    """误差带 [t-err, t+err] 到区间 [lo, hi] 的最近距离(相交为 0)。"""
+    return max(0.0, lo - (t + err), (t - err) - hi)
+
+
+def _band_dist_max(t: float, err: float, lo: float, hi: float) -> float:
+    """误差带 [t-err, t+err] 到区间 [lo, hi] 的最远距离(在带端点处取得)。"""
+    return max(_dist(t - err, lo, hi), _dist(t + err, lo, hi))
 
 
 def _parse_csv(csv_text: str, expected_seconds: float) -> list[tuple[float, float]]:
@@ -117,64 +134,116 @@ def _densify(
     return pts
 
 
-def _excursions(
-    samples: list[tuple[float, float]], lo: float, hi: float
-) -> list[dict[str, Any]]:
-    """实际超出允许温区 [lo, hi] 的全部起止秒数(恰在边界不算超界)。
+def _band_excursions(
+    samples: list[tuple[float, float]], lo: float, hi: float, err: float
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """按误差带 [实测-err, 实测+err] 判定确定/可能超界的连续时间段。
 
-    温度在相邻采样点间线性变化,在穿越边界处切段;严格超界的连续段
-    (中间仅经过恰在边界上的点也视为同一段)合并为一个区间输出。
+    - 确定超界:误差带整体越界 ⟺ 实测温度 > hi+err 或 < lo-err;
+    - 可能超界:误差带接触或跨越界外但未整体越界 ⟺ 实测温度 > hi-err 或
+      < lo+err,且不满足确定超界。
+    带端点恰等于上下限(边界相等)不算超界。温度在相邻采样点间线性变化,
+    在 lo±err、hi±err 四条温度界处切段后,每个小区间只会整体属于某一类;
+    连续同类段(中间仅经过恰在界上的点也视为同一段)合并为一个区间输出。
+    err=0 时确定超界即实测温度超界,可能超界恒为空,与原复核结果一致。
+    返回 (确定超界区间, 可能超界区间)。
     """
-    pts = _densify(samples, (lo, hi))
-    spans: list[list[float]] = []  # [start, end, max_temp, min_temp]
+    bounds = tuple(sorted({lo - err, lo + err, hi - err, hi + err}))
+    pts = _densify(samples, bounds)
+    spans: list[tuple[str, list[float]]] = []  # (kind, [start, end, max_T, min_T])
+    cur_kind: str | None = None
     cur: list[float] | None = None
     for (t0, T0), (t1, T1) in zip(pts, pts[1:]):
         mid = (T0 + T1) / 2.0
-        if mid > hi or mid < lo:  # 开区间严格超界;恰在边界不算
-            seg_hi, seg_lo = max(T0, T1), min(T0, T1)
-            if cur is None:
-                cur = [t0, t1, seg_hi, seg_lo]
-            else:
-                cur[1] = t1
-                cur[2] = max(cur[2], seg_hi)
-                cur[3] = min(cur[3], seg_lo)
-        elif cur is not None:
-            spans.append(cur)
-            cur = None
+        if mid > hi + err or mid < lo - err:
+            kind = "certain"  # 误差带整体越界(严格;恰等不算)
+        elif mid > hi - err or mid < lo + err:
+            kind = "possible"  # 误差带接触或跨越界外,但未整体越界
+        else:
+            kind = None
+        if kind is None:
+            if cur is not None:
+                spans.append((cur_kind, cur))
+                cur = None
+            continue
+        seg_hi, seg_lo = max(T0, T1), min(T0, T1)
+        if cur is not None and cur_kind == kind:
+            cur[1] = t1
+            cur[2] = max(cur[2], seg_hi)
+            cur[3] = min(cur[3], seg_lo)
+        else:
+            if cur is not None:
+                spans.append((cur_kind, cur))
+            cur_kind = kind
+            cur = [t0, t1, seg_hi, seg_lo]
     if cur is not None:
-        spans.append(cur)
-    return [
-        {
+        spans.append((cur_kind, cur))
+
+    def fmt_span(s: float, e: float, mx: float, mn: float) -> dict[str, Any]:
+        # side 按误差带越界方向判定;err=0 时退化为实测温度越界方向
+        band_lo, band_hi = mn - err, mx + err
+        return {
             "start_s": _r(s),
             "end_s": _r(e),
             "duration_s": _r(e - s),
             "min_temperature": _r(mn),
             "max_temperature": _r(mx),
             "side": (
-                "both" if mn < lo and mx > hi else "low" if mn < lo else "high"
+                "both"
+                if band_lo < lo and band_hi > hi
+                else "low"
+                if band_lo < lo
+                else "high"
             ),
         }
-        for s, e, mx, mn in spans
-    ]
+
+    certain = [fmt_span(*span) for kind, span in spans if kind == "certain"]
+    possible = [fmt_span(*span) for kind, span in spans if kind == "possible"]
+    return certain, possible
 
 
-def _degree_hours(
-    samples: list[tuple[float, float]], pref_lo: float, pref_hi: float
-) -> float:
-    """实测累计度时(℃·h):温度到首选区间距离对时间的积分 ÷ 3600。
+def _degree_hours_band(
+    samples: list[tuple[float, float]], pref_lo: float, pref_hi: float, err: float
+) -> tuple[float, float, float]:
+    """实测度时(名义值)与误差带度时下界、上界(℃·h),对时间积分 ÷ 3600。
 
-    在穿越首选区间边界处切段后,距离函数在每小段内是线性的,
-    梯形求和即为精确积分(不以采样点是否超界或平均温度代替)。
+    每时刻真实温度落在误差带 [T-err, T+err] 内:
+    - 下界距离 = 误差带到首选区间的最近距离(带与区间相交时为 0);
+    - 上界距离 = 误差带到首选区间的最远距离(在带端点处取得)。
+    两者都是实测温度 T 的分段线性函数,距离公式改变处(转折点)只可能出现在
+    pref_lo±err、pref_hi±err、pref_lo、pref_hi 及首选区间中点(误差带整体
+    覆盖首选区间时,最远端点在带两端切换)这些温度界上;在这些界处切段后,
+    每小段内三种距离关于时间都是线性的,梯形求和即为精确积分
+    (不以采样点是否超界或平均温度代替)。err=0 时下界=上界=名义值,
+    与原复核结果一致。返回 (名义值, 下界, 上界)。
     """
-    pts = _densify(samples, (pref_lo, pref_hi))
-    deg_s = 0.0
-    for (t0, T0), (t1, T1) in zip(pts, pts[1:]):
-        deg_s += (
-            (_dist(T0, pref_lo, pref_hi) + _dist(T1, pref_lo, pref_hi))
-            / 2.0
-            * (t1 - t0)
+    bounds = tuple(
+        sorted(
+            {
+                pref_lo - err,
+                pref_lo,
+                pref_lo + err,
+                pref_hi - err,
+                pref_hi,
+                pref_hi + err,
+                (pref_lo + pref_hi) / 2.0,
+            }
         )
-    return deg_s / 3600.0
+    )
+    pts = _densify(samples, bounds)
+    nom_s = lo_s = hi_s = 0.0
+    for (t0, T0), (t1, T1) in zip(pts, pts[1:]):
+        dt = t1 - t0
+        nom_s += (_dist(T0, pref_lo, pref_hi) + _dist(T1, pref_lo, pref_hi)) / 2.0 * dt
+        lo_s += (
+            _band_dist_min(T0, err, pref_lo, pref_hi)
+            + _band_dist_min(T1, err, pref_lo, pref_hi)
+        ) / 2.0 * dt
+        hi_s += (
+            _band_dist_max(T0, err, pref_lo, pref_hi)
+            + _band_dist_max(T1, err, pref_lo, pref_hi)
+        ) / 2.0 * dt
+    return nom_s / 3600.0, lo_s / 3600.0, hi_s / 3600.0
 
 
 def review(payload: dict[str, Any]) -> dict[str, Any]:
@@ -185,6 +254,19 @@ def review(payload: dict[str, Any]) -> dict[str, Any]:
     if box_no is None:
         raise ValueError("请指定要复核的箱号 box_no")
     box_no = int(box_no)
+
+    # 测温仪器绝对误差(可选,非负 ℃,默认 0):真实温度视为实测值 ±误差
+    err_raw = payload.get("instrument_error", 0)
+    if err_raw in (None, ""):
+        err_raw = 0
+    try:
+        err = float(err_raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "测温仪器绝对误差 instrument_error 须为非负数值(℃)"
+        ) from None
+    if not math.isfinite(err) or err < 0:
+        raise ValueError("测温仪器绝对误差 instrument_error 须为非负有限数值(℃)")
 
     # 复核绑定生成方案时的输入快照:按快照重新规划并定位箱子
     result = plan(plan_input)
@@ -219,16 +301,28 @@ def review(payload: dict[str, Any]) -> dict[str, Any]:
         mb = c.get("max_degree_hours")
         budget = None if mb in (None, "") else float(mb)
 
-        excursions = _excursions(samples, lo, hi)
-        measured = (
-            _degree_hours(samples, float(p_lo), float(p_hi)) if has_pref else None
-        )
+        # 确定超界(误差带整体越界)与可能超界(误差带接触或跨越界外)
+        certain, possible = _band_excursions(samples, lo, hi, err)
+        nominal = lower = upper = None
+        if has_pref:
+            nominal, lower, upper = _degree_hours_band(
+                samples, float(p_lo), float(p_hi), err
+            )
         exceeded: bool | None = None
         remaining: float | None = None
-        if budget is not None and measured is not None:
-            # 严格大于预算才判超限;未设预算的批次不判
-            exceeded = measured > budget + EPS
-            remaining = budget - measured
+        budget_status: str | None = None
+        if budget is not None and nominal is not None:
+            # 名义判定(兼容字段):实测值度时严格大于预算才判超限
+            exceeded = nominal > budget + EPS
+            remaining = budget - nominal
+            # 误差带判定:下界严格大于预算→确定超限;上界未超预算→确定未超限;
+            # 其余(上界超、下界未超)→可能超限;未设预算的批次不判
+            if lower > budget + EPS:
+                budget_status = "exceeded"
+            elif upper <= budget + EPS:
+                budget_status = "within"
+            else:
+                budget_status = "possible"
 
         batches_out.append(
             {
@@ -237,25 +331,32 @@ def review(payload: dict[str, Any]) -> dict[str, Any]:
                 "units": units_by_no[no],
                 "allowed_t_min": _r(lo),
                 "allowed_t_max": _r(hi),
-                "within_limits": not excursions,
-                "excursion_count": len(excursions),
-                "excursions": excursions,
+                # 误差带全程未接触界外才算确定在界内;err=0 时与原判定一致
+                "within_limits": not certain and not possible,
+                "excursion_count": len(certain),
+                "excursions": certain,
+                "possible_excursion_count": len(possible),
+                "possible_excursions": possible,
                 "preferred_t_min": _r(float(p_lo)) if has_pref else None,
                 "preferred_t_max": _r(float(p_hi)) if has_pref else None,
                 "measured_degree_hours": (
-                    _r(measured) if measured is not None else None
+                    _r(nominal) if nominal is not None else None
                 ),
+                "degree_hours_lower": _r(lower) if lower is not None else None,
+                "degree_hours_upper": _r(upper) if upper is not None else None,
                 "max_degree_hours": _r(budget) if budget is not None else None,
                 "remaining_budget": (
                     _r(remaining) if remaining is not None else None
                 ),
                 "budget_exceeded": exceeded,
+                "budget_status": budget_status,
             }
         )
 
     return {
         "input_fingerprint": input_fingerprint(plan_input),
         "box_no": box_no,
+        "instrument_error": _r(err),
         "transport_hours": _r(transport_hours),
         "duration_seconds": _r(expected_s),
         "sample_count": len(samples),
@@ -266,11 +367,20 @@ def review(payload: dict[str, Any]) -> dict[str, Any]:
                 1 for b in batches_out if b["excursion_count"]
             ),
             "total_excursions": sum(b["excursion_count"] for b in batches_out),
+            "batches_with_possible_excursions": sum(
+                1 for b in batches_out if b["possible_excursion_count"]
+            ),
+            "total_possible_excursions": sum(
+                b["possible_excursion_count"] for b in batches_out
+            ),
             "budget_checked_count": sum(
-                1 for b in batches_out if b["budget_exceeded"] is not None
+                1 for b in batches_out if b["budget_status"] is not None
             ),
             "budget_exceeded_count": sum(
-                1 for b in batches_out if b["budget_exceeded"]
+                1 for b in batches_out if b["budget_status"] == "exceeded"
+            ),
+            "budget_possible_count": sum(
+                1 for b in batches_out if b["budget_status"] == "possible"
             ),
             "all_within_limits": all(b["within_limits"] for b in batches_out),
         },

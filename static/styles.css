@@ -330,6 +330,8 @@ table.seg-checks tr:last-child td { border-bottom: none; }
 table.seg-checks tr.seg-ok td:first-child { color: var(--ok); font-weight: 700; }
 table.seg-checks tr.seg-bad td { background: var(--err-bg); }
 table.seg-checks tr.seg-bad td:first-child { color: var(--err); font-weight: 700; }
+table.seg-checks tr.seg-warn td { background: var(--warn-bg); }
+table.seg-checks tr.seg-warn td:first-child { color: var(--warn); font-weight: 700; }
 
 /* ---------- 热暴露预算 ---------- */
 .heat-table { margin-top: 10px; }
@@ -348,6 +350,7 @@ table.seg-checks tr.seg-bad td:first-child { color: var(--err); font-weight: 700
 .heat-bar > i.heat-warn { background: linear-gradient(90deg, #e0a63c, #c07f00); }
 .heat-bar > i.heat-bad { background: linear-gradient(90deg, #d95940, var(--err)); }
 .heat-text-ok { color: var(--ok); font-weight: 600; }
+.heat-text-warn { color: var(--warn); font-weight: 600; }
 .heat-text-bad { color: var(--err); font-weight: 600; }
 
 .error-box {
@@ -491,6 +494,7 @@ table.seg-checks tr.seg-bad td:first-child { color: var(--err); font-weight: 700
   margin: 4px 0 12px;
 }
 .review-controls label { flex: 1 1 220px; }
+.review-controls label.review-err { flex: 0 0 120px; }
 .review-controls .btn { flex: 0 0 auto; }
 select, input[type="file"] {
   border: 1px solid var(--line);

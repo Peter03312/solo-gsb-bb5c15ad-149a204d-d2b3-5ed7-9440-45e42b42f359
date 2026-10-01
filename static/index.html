@@ -111,6 +111,7 @@
         <div id="reviewView" hidden>
           <h3>实测温度复核
             <span id="reviewStale" class="stale-badge" hidden>⚠ 输入已变化,复核结果已过期,请重新生成方案</span>
+            <span id="reviewErrStale" class="stale-badge" hidden>⚠ 误差参数已变化,结果对应旧误差值,请重新复核</span>
           </h3>
           <div class="review-controls">
             <label>复核箱子
@@ -118,6 +119,10 @@
             </label>
             <label>实测温度 CSV(time_seconds,temperature)
               <input type="file" id="reviewFile" accept=".csv,text/csv" />
+            </label>
+            <label class="review-err">仪器误差 ±℃
+              <input type="number" id="instrumentError" min="0" step="any" value="0"
+                     title="测温仪器绝对误差(非负,默认 0);真实温度视为实测值±误差,按误差带核算确定/可能超界与度时上下界" />
             </label>
             <button id="btnReview" type="button" class="btn btn-small">📈 开始复核</button>
             <button id="btnCsvTemplate" type="button" class="btn btn-small">下载 CSV 模板</button>
